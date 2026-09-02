@@ -1,4 +1,4 @@
-# PinTrip
+# ProjectAqua
 
 **Plan anywhere. Travel with us.**
 
