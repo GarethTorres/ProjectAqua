@@ -147,20 +147,25 @@ components/
   ui/                      Small button/card/input/textarea/spinner primitives
 
 lib/
-  places/extractPlaces.ts  Rule-based place extraction (no LLM in Phase 1)
-  places/normalizePlace.ts  Line-level cleanup helpers
-  places/createPlace.ts    GeocodeResult → Place
-  places/inferTripRegion.ts  Robust (median) trip center + country/region consensus
-  places/detectOutliers.ts   Flag places implausibly far from the cluster
-  mapbox/client.ts         Single network entry point (Search Box API) + MapboxError
-  mapbox/geocodeCandidates.ts  Multi-candidate forward search (name+addr+region+country)
-  mapbox/resolvePlaceWithContext.ts  Context-aware itinerary resolution + outlier fix
-  mapbox/searchPlaces.ts   Multi-result search for the confirmation screen
-  navigation/openAppleMaps.ts  Build + open a maps.apple.com directions URL
-  storage/                 Repository abstraction over localStorage (see above)
+  places/parseItinerary.ts   text → ParsedItinerary (days, contexts, destinations)
+  places/classifyLine.ts     per-line classifier: day / heading / place / note / …
+  places/normalizePlace.ts   line-level cleanup helpers
+  places/dedupePlaces.ts     geocoding-based de-duplication (merges day numbers)
+  places/geographyData.ts    US states + country words (region recognition)
+  places/extractPlaces.ts    back-compat string[] shim over parseItinerary
+  places/createPlace.ts      resolved place (+ parser metadata) → Place
+  places/inferTripRegion.ts  robust (median) trip center + country/region consensus
+  places/detectOutliers.ts   flag places implausibly far from the cluster
+  places/fixtures/newMexico.ts  the real regression itinerary
+  mapbox/client.ts           single network entry point (Search Box API) + retries
+  mapbox/geocodeCandidates.ts  multi-candidate forward search
+  mapbox/resolvePlaceWithContext.ts  context-aware resolution + outlier fix + dedupe
+  mapbox/searchPlaces.ts     multi-result search for the confirmation screen
+  navigation/openAppleMaps.ts  build + open a maps.apple.com directions URL
+  storage/                   repository abstraction over localStorage (see above)
 
 types/
-  trip.ts, place.ts        Shared models
+  trip.ts, place.ts, itinerary.ts   shared models
 ```
 
 **Design principles**
@@ -168,36 +173,61 @@ types/
 - Business logic stays in `lib/`, not in components.
 - The map is client-only and loaded via `next/dynamic` so `mapbox-gl` never runs
   during SSR.
-- The place parser is deliberately swappable — `parseItinerary(text)`-shaped, so
-  an AI extractor can replace the rules later without other changes.
 - Coordinates are authoritative for navigation; Apple Maps handles routing.
+
+### Importing a real travel document (Phase 1.5)
+
+`parseItinerary(text)` turns messy pasted text into a `ParsedItinerary`
+(deterministic, rule-based, no LLM):
+
+- **City / region headings become context, not pins.** A short Title-Case line
+  followed by places ("Albuquerque", "Santa Fe", "Tokyo", "Paris") is treated as
+  a section heading; a known state / country ("New Mexico") is a region heading.
+  Both qualify the geocoding query for the places under them and never become
+  destination pins themselves. Standalone `… National Park / Monument` lines
+  ignore a nearby city heading so they aren't dragged into it.
+- **Days are preserved.** `Day N` headings attach `day` to the destinations that
+  follow, kept for future use. No Day-based UI yet.
+- **Metadata / notes / URLs / "Stay in …" are dropped.** Times, durations, dates,
+  `→` / `+` chains, reservation sentences, and overnight lines don't create pins.
+  "Stay in Abq" is recognised as overnight context and, once "Albuquerque" has
+  appeared, resolved to it.
+- **Repeats are de-duplicated** (overview list + day-by-day plan) using Mapbox
+  id → coordinates → canonical name → normalized original text. Smart vs straight
+  quotes are folded; day numbers merge onto the survivor.
 
 ### Geocoding accuracy
 
-Pasted itineraries contain ambiguous names ("Plaza", "Santa Fe") that can resolve
-to the wrong country. `resolvePlaceWithContext.ts` corrects this deterministically
-(no LLM):
+`resolvePlaceWithContext.ts` resolves each destination with this geographic
+priority: **local city context → trip Destination → nearby resolved places →
+inferred trip region → global search**.
 
-1. **Destination as the strongest hint** — geocoded first and used as proximity
-   bias; its text is appended to lines that carry no location context of their
-   own (`"Santa Fe Plaza"` → `"Santa Fe Plaza, New Mexico"`, but `"Taos, NM"` is
-   left alone).
-2. **Candidate re-ranking** — each lookup pulls the top 5 matches and re-orders
-   them by name similarity to the pasted text, so an exact-named POI ranked #3
-   beats a generically-named nearby street at #1.
-3. **Robust region inference** — a component-wise **median** center of everything
-   that resolved, so one bad pin barely moves it, plus country/region consensus.
-4. **Outlier detection** — a place is suspicious when it is far past a robust
-   distance fence (median radius + MAD-scaled spread, with an absolute floor and
-   a large allowance for genuinely spread-out road trips) and/or in a different
-   country than a clear majority.
-5. **Conservative correction** — only suspicious places are re-searched, biased to
-   the trip center. A replacement is accepted only if it strongly name-matches,
-   sits inside the fence, matches the dominant country, and is materially closer.
+1. **One geographic qualifier, space-joined.** `"Cathedral Basilica"` under a
+   Santa Fe section → `"Cathedral Basilica Santa Fe"`. Mapbox Search Box degrades
+   with extra trailing words, so at most one qualifier is appended and lines that
+   already name their location ("Taos, NM") are left alone.
+2. **Candidate re-ranking.** Each lookup pulls several matches and re-orders them
+   by name similarity (word-set Jaccard, plus containment) nudged toward an
+   anchor — the median of already-resolved places sharing the same city, else the
+   region centre / destination. A confident match that shares almost no words
+   with the query is reported as *unresolved* rather than dropped as a bad pin.
+3. **Robust region inference.** Component-wise **median** centre, so one bad pin
+   barely moves it, plus country / region consensus.
+4. **Outlier detection.** A place is suspicious when it is far past a robust
+   distance fence (median radius + MAD-scaled spread, an absolute floor, and a
+   large allowance for genuinely spread-out road trips) and/or in a minority
+   country. Distance alone is only ever a *signal*.
+5. **Conservative correction.** Only suspicious places are re-searched (biased to
+   the trip centre); a replacement is accepted only if it strongly name-matches,
+   sits inside the fence, matches the dominant country and is materially closer.
    A legitimately remote stop whose re-search returns the same place is never
-   overwritten. Corrected places are marked "Matched near your trip area" and the
-   user can still Search again / remove / add.
+   overwritten. Corrections are marked "Matched near your trip area"; the user can
+   still Search again / remove / add.
 
-Tested with `npm test` (Vitest): Mexico-mismatch correction with and without a
-destination, multi-state road trips left untouched, ambiguous multi-candidate
-names, and remote-but-real stops preserved.
+`lib/mapbox/client.ts` retries rate-limited (429) and 5xx responses with backoff,
+and the resolver paces requests, so a bulk import doesn't drop lines.
+
+Tested with `npm test` (Vitest): line classification, itinerary parsing incl. the
+real New Mexico regression fixture, de-duplication, city-context resolution,
+multi-region road trips left untouched, Mexico-mismatch correction with and
+without a destination, and remote-but-real stops preserved.

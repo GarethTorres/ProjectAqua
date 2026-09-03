@@ -1,6 +1,9 @@
 export type Place = {
   id: string;
+  /** User-facing label — the itinerary's original text / language. */
   name: string;
+  /** Mapbox's canonical name, when it differs from `name`. */
+  resolvedName?: string;
   formattedAddress?: string;
   latitude: number;
   longitude: number;
@@ -11,6 +14,10 @@ export type Place = {
   region?: string;
   /** ISO 3166-1 alpha-2 country code, when available (e.g. "US"). */
   countryCode?: string;
+  /** 1-based day this place falls on, when the itinerary had "Day N" headings. */
+  day?: number;
+  /** All day numbers this place appeared under (repeat itineraries). */
+  days?: number[];
   visited: boolean;
   sortOrder: number;
 };
@@ -40,8 +47,13 @@ export type GeocodeResult = {
 export type PlaceDraft = {
   id: string;
   query: string;
+  /** The user's original text for this line (shown as the card title). */
+  displayName: string;
   result: GeocodeResult;
   included: boolean;
+  /** 1-based day, when the itinerary had "Day N" headings. */
+  day?: number;
+  days?: number[];
   /** True when the outlier-correction pass swapped in a different match. */
   autoCorrected?: boolean;
   /** Subtle explanation shown when `autoCorrected` is true. */

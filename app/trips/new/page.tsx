@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import type { GeocodeResult, PlaceDraft } from "@/types/place";
+import type { PlaceDraft } from "@/types/place";
 import type { Trip } from "@/types/trip";
-import { extractPlacesFromText } from "@/lib/places/extractPlaces";
+import type { GeoContext } from "@/types/itinerary";
+import { parseItinerary } from "@/lib/places/parseItinerary";
 import { resolveItineraryPlaces } from "@/lib/mapbox/resolvePlaceWithContext";
 import { MapboxError } from "@/lib/mapbox/client";
 import { placeFromGeocode, resequence } from "@/lib/places/createPlace";
@@ -33,13 +34,14 @@ export default function NewTripPage() {
   });
   const [drafts, setDrafts] = useState<PlaceDraft[]>([]);
   const [unresolved, setUnresolved] = useState<string[]>([]);
+  const [contexts, setContexts] = useState<GeoContext[]>([]);
   const [proximity, setProximity] = useState<[number, number] | undefined>();
 
   async function handleFind(input: ItineraryInput) {
     setError(null);
-    const candidates = extractPlacesFromText(input.text);
+    const parsed = parseItinerary(input.text);
 
-    if (candidates.length === 0) {
+    if (parsed.destinations.length === 0) {
       setError(
         "We couldn't find any places in that text. Try placing one destination per line.",
       );
@@ -48,9 +50,10 @@ export default function NewTripPage() {
 
     setLoading(true);
     setMeta({ name: input.name, destination: input.destination });
+    setContexts(parsed.contexts);
 
     try {
-      const outcome = await resolveItineraryPlaces(candidates, {
+      const outcome = await resolveItineraryPlaces(parsed.destinations, {
         destination: input.destination || undefined,
       });
 
@@ -64,19 +67,17 @@ export default function NewTripPage() {
       setProximity(
         outcome.region
           ? [outcome.region.center.longitude, outcome.region.center.latitude]
-          : outcome.resolved[0]?.result
-            ? [
-                outcome.resolved[0].result.longitude,
-                outcome.resolved[0].result.latitude,
-              ]
-            : undefined,
+          : undefined,
       );
       setDrafts(
         outcome.resolved.map((it) => ({
           id: uid(),
-          query: it.query,
-          result: it.result as GeocodeResult,
+          query: it.originalText,
+          displayName: it.displayName,
+          result: it.result!,
           included: true,
+          day: it.day,
+          days: it.days,
           autoCorrected: it.autoCorrected,
           note: it.note,
         })),
@@ -91,18 +92,30 @@ export default function NewTripPage() {
       } else if (err instanceof MapboxError) {
         setError(`${err.message} Tap Find Places to retry.`);
       } else {
-        setError("Something went wrong finding your places. Tap Find Places to retry.");
+        setError(
+          "Something went wrong finding your places. Tap Find Places to retry.",
+        );
       }
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleCreate(results: GeocodeResult[]) {
+  async function handleCreate(included: PlaceDraft[]) {
     setCreating(true);
     try {
       const places = resequence(
-        results.map((r, i) => placeFromGeocode(r, i)),
+        included.map((d, i) =>
+          placeFromGeocode(
+            {
+              result: d.result,
+              displayName: d.displayName,
+              day: d.day,
+              days: d.days,
+            },
+            i,
+          ),
+        ),
       );
       const now = nowIso();
       const trip: Trip = {
@@ -162,6 +175,7 @@ export default function NewTripPage() {
             <PlaceConfirmation
               initialDrafts={drafts}
               unresolved={unresolved}
+              contexts={contexts}
               proximity={proximity}
               creating={creating}
               onCreate={handleCreate}

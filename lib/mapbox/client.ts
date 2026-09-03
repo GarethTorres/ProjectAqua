@@ -96,15 +96,38 @@ export async function mapboxForwardGeocode(
     url.searchParams.set("proximity", options.proximity.join(","));
   }
 
-  let response: Response;
-  try {
-    response = await fetch(url, { signal: options.signal });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new MapboxError("network", "Could not reach Mapbox. Check your connection.");
-  }
+  // A bulk itinerary import fires many requests in quick succession; Search Box
+  // can answer some with 429. Retry rate-limit / transient errors a few times
+  // with backoff before giving up on that one line.
+  const backoffMs = [400, 900, 1800];
+  let response: Response | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await fetch(url, { signal: options.signal });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      if (attempt < backoffMs.length) {
+        await sleep(backoffMs[attempt], options.signal);
+        continue;
+      }
+      throw new MapboxError(
+        "network",
+        "Could not reach Mapbox. Check your connection.",
+      );
+    }
 
-  if (!response.ok) {
+    if (response.ok) break;
+    const retryable = response.status === 429 || response.status >= 500;
+    if (retryable && attempt < backoffMs.length) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      await sleep(
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : backoffMs[attempt],
+        options.signal,
+      );
+      continue;
+    }
     throw new MapboxError(
       "request-failed",
       `Mapbox request failed (${response.status}).`,
@@ -115,4 +138,22 @@ export async function mapboxForwardGeocode(
   return (data.features ?? [])
     .map(toResult)
     .filter((r): r is GeocodeResult => r !== null);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }

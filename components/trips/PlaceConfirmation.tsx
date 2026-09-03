@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Check, MapPin, Plus, Search, Trash2, X } from "lucide-react";
 import type { GeocodeResult, PlaceDraft } from "@/types/place";
+import type { GeoContext } from "@/types/itinerary";
 import { searchPlaces } from "@/lib/mapbox/searchPlaces";
 import { cn, uid } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -16,17 +17,25 @@ function describeLocation(result: GeocodeResult): string {
   return [result.region, result.country].filter(Boolean).join(", ");
 }
 
+function sameName(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[’'`]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+  return norm(a) === norm(b);
+}
+
 type PlaceConfirmationProps = {
   initialDrafts: PlaceDraft[];
   unresolved: string[];
+  contexts?: GeoContext[];
   proximity?: [number, number];
   creating?: boolean;
-  onCreate: (results: GeocodeResult[]) => void;
+  onCreate: (included: PlaceDraft[]) => void;
 };
 
 export function PlaceConfirmation({
   initialDrafts,
   unresolved,
+  contexts = [],
   proximity,
   creating,
   onCreate,
@@ -46,13 +55,19 @@ export function PlaceConfirmation({
   const addResult = (result: GeocodeResult) => {
     setDrafts((prev) => [
       ...prev,
-      { id: uid(), query: result.name, result, included: true },
+      {
+        id: uid(),
+        query: result.name,
+        displayName: result.name,
+        result,
+        included: true,
+      },
     ]);
     setAddingOpen(false);
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div>
         <h1 className="text-[22px] font-semibold tracking-tight">
           We found {drafts.length} {drafts.length === 1 ? "place" : "places"}
@@ -60,98 +75,121 @@ export function PlaceConfirmation({
         <p className="mt-1 text-[14px] text-muted-foreground">
           Check the pins are right. Uncheck or remove anything that looks off.
         </p>
+        {contexts.length > 0 ? (
+          <p className="mt-2 text-[12px] text-muted-foreground">
+            <span className="font-medium">{contexts.length}</span>{" "}
+            {contexts.length === 1 ? "context" : "contexts"} used —{" "}
+            {contexts.map((c) => c.text).join(" · ")}
+          </p>
+        ) : null}
       </div>
 
       <ul className="space-y-2.5">
-        {drafts.map((draft) => (
-          <li key={draft.id}>
-            <Card className="px-3.5 py-3">
-              <div className="flex items-start gap-3">
-                <button
-                  type="button"
-                  role="checkbox"
-                  aria-checked={draft.included}
-                  aria-label={draft.included ? "Exclude place" : "Include place"}
-                  onClick={() => patch(draft.id, { included: !draft.included })}
-                  className={cn(
-                    "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-lg border transition-colors",
-                    draft.included
-                      ? "border-accent bg-accent text-accent-foreground"
-                      : "border-border bg-surface",
-                  )}
-                >
-                  {draft.included ? <Check className="size-4" strokeWidth={3} /> : null}
-                </button>
-
-                <div className="min-w-0 flex-1">
-                  <p
+        {drafts.map((draft) => {
+          const resolvedName = draft.result.name;
+          const showResolved = !sameName(draft.displayName, resolvedName);
+          return (
+            <li key={draft.id}>
+              <Card className="px-3.5 py-3">
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={draft.included}
+                    aria-label={draft.included ? "Exclude place" : "Include place"}
+                    onClick={() => patch(draft.id, { included: !draft.included })}
                     className={cn(
-                      "text-[15px] font-semibold tracking-tight",
-                      !draft.included && "text-muted-foreground",
+                      "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-lg border transition-colors",
+                      draft.included
+                        ? "border-accent bg-accent text-accent-foreground"
+                        : "border-border bg-surface",
                     )}
                   >
-                    {draft.result.name}
-                  </p>
-                  {describeLocation(draft.result) ? (
-                    <p className="mt-0.5 line-clamp-2 text-[12.5px] text-muted-foreground">
-                      {describeLocation(draft.result)}
-                    </p>
-                  ) : null}
-                  {draft.autoCorrected ? (
-                    <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent">
-                      <MapPin className="size-3" />
-                      {draft.note ?? "Matched near your trip area"}
-                    </p>
-                  ) : null}
-                  {draft.query.toLowerCase() !== draft.result.name.toLowerCase() ? (
-                    <p className="mt-0.5 text-[11.5px] text-muted-foreground/70">
-                      from “{draft.query}”
-                    </p>
-                  ) : null}
+                    {draft.included ? (
+                      <Check className="size-4" strokeWidth={3} />
+                    ) : null}
+                  </button>
 
-                  <div className="mt-2 flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setEditingId((cur) => (cur === draft.id ? null : draft.id))
-                      }
-                      className="text-[12.5px] font-medium text-accent hover:underline"
-                    >
-                      {editingId === draft.id ? "Cancel" : "Search again"}
-                    </button>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p
+                        className={cn(
+                          "text-[15px] font-semibold tracking-tight",
+                          !draft.included && "text-muted-foreground",
+                        )}
+                      >
+                        {draft.displayName}
+                      </p>
+                      {draft.day ? (
+                        <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10.5px] font-medium text-muted-foreground">
+                          Day {draft.day}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {showResolved ? (
+                      <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+                        → {resolvedName}
+                      </p>
+                    ) : null}
+                    {describeLocation(draft.result) ? (
+                      <p className="mt-0.5 line-clamp-2 text-[12.5px] text-muted-foreground">
+                        {describeLocation(draft.result)}
+                      </p>
+                    ) : null}
+                    {draft.autoCorrected ? (
+                      <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent">
+                        <MapPin className="size-3" />
+                        {draft.note ?? "Matched near your trip area"}
+                      </p>
+                    ) : null}
+
+                    <div className="mt-2 flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingId((cur) =>
+                            cur === draft.id ? null : draft.id,
+                          )
+                        }
+                        className="text-[12.5px] font-medium text-accent hover:underline"
+                      >
+                        {editingId === draft.id ? "Cancel" : "Search again"}
+                      </button>
+                    </div>
+
+                    {editingId === draft.id ? (
+                      <div className="mt-2">
+                        <PlaceSearchBox
+                          defaultQuery={draft.displayName}
+                          proximity={proximity}
+                          onPick={(result) => {
+                            patch(draft.id, {
+                              result,
+                              included: true,
+                              autoCorrected: false,
+                              note: undefined,
+                            });
+                            setEditingId(null);
+                          }}
+                        />
+                      </div>
+                    ) : null}
                   </div>
 
-                  {editingId === draft.id ? (
-                    <div className="mt-2">
-                      <PlaceSearchBox
-                        defaultQuery={draft.query}
-                        proximity={proximity}
-                        onPick={(result) => {
-                          patch(draft.id, {
-                            result,
-                            included: true,
-                            autoCorrected: false,
-                            note: undefined,
-                          });
-                          setEditingId(null);
-                        }}
-                      />
-                    </div>
-                  ) : null}
+                  <button
+                    type="button"
+                    aria-label="Remove place"
+                    onClick={() => remove(draft.id)}
+                    className="mt-0.5 shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-danger"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
                 </div>
-
-                <button
-                  type="button"
-                  aria-label="Remove place"
-                  onClick={() => remove(draft.id)}
-                  className="mt-0.5 shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-danger"
-                >
-                  <Trash2 className="size-4" />
-                </button>
-              </div>
-            </Card>
-          </li>
-        ))}
+              </Card>
+            </li>
+          );
+        })}
       </ul>
 
       {unresolved.length > 0 ? (
@@ -193,9 +231,7 @@ export function PlaceConfirmation({
         size="lg"
         className="w-full"
         disabled={includedCount === 0 || creating}
-        onClick={() =>
-          onCreate(drafts.filter((d) => d.included).map((d) => d.result))
-        }
+        onClick={() => onCreate(drafts.filter((d) => d.included))}
       >
         {creating ? <Spinner /> : null}
         {creating
@@ -267,7 +303,11 @@ function PlaceSearchBox({
           disabled={loading || query.trim().length === 0}
           className="h-10 px-3"
         >
-          {loading ? <Spinner className="text-foreground" /> : <Search className="size-4" />}
+          {loading ? (
+            <Spinner className="text-foreground" />
+          ) : (
+            <Search className="size-4" />
+          )}
         </Button>
       </div>
 
