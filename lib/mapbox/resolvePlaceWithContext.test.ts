@@ -10,6 +10,7 @@ vi.mock("./client", async (importOriginal) => {
 
 import { mapboxForwardGeocode, type ForwardGeocodeOptions } from "./client";
 import {
+  buildContextualQuery,
   buildEffectiveQuery,
   chooseBetterCandidate,
   hasLocationContext,
@@ -74,9 +75,9 @@ describe("hasLocationContext", () => {
 });
 
 describe("buildEffectiveQuery", () => {
-  it("appends the destination when the line lacks context", () => {
+  it("appends the destination (space-joined) when the line lacks context", () => {
     expect(buildEffectiveQuery("Santa Fe Plaza", "New Mexico")).toBe(
-      "Santa Fe Plaza, New Mexico",
+      "Santa Fe Plaza New Mexico",
     );
   });
   it("leaves lines that already carry context alone", () => {
@@ -84,6 +85,46 @@ describe("buildEffectiveQuery", () => {
   });
   it("is a no-op without a destination", () => {
     expect(buildEffectiveQuery("Plaza")).toBe("Plaza");
+  });
+});
+
+describe("buildContextualQuery", () => {
+  it("appends only the nearest city (one qualifier keeps Search Box accurate)", () => {
+    expect(
+      buildContextualQuery(
+        {
+          originalText: "Cathedral Basilica",
+          context: [
+            { text: "Santa Fe", kind: "city" },
+            { text: "New Mexico", kind: "region" },
+          ],
+        },
+        "New Mexico",
+      ),
+    ).toBe("Cathedral Basilica Santa Fe");
+  });
+
+  it("falls back to the region when there is no city context", () => {
+    expect(
+      buildContextualQuery(
+        {
+          originalText: "Some Overlook",
+          context: [{ text: "New Mexico", kind: "region" }],
+        },
+        undefined,
+      ),
+    ).toBe("Some Overlook New Mexico");
+  });
+  it("never appends a city to a self-standing National Park", () => {
+    expect(
+      buildContextualQuery(
+        {
+          originalText: "Badlands National Park",
+          context: [{ text: "Denver", kind: "city" }],
+        },
+        undefined,
+      ),
+    ).toBe("Badlands National Park");
   });
 });
 
@@ -297,5 +338,148 @@ describe("resolveItineraryPlaces — outlier correction", () => {
     expect(
       haversineKm(outcome.region!.center, gc.result!),
     ).toBeGreaterThan(outcome.region!.outlierThresholdKm);
+  });
+});
+
+// --- Phase 1.5: section context + multi-region road trips -------------------
+
+describe("resolveItineraryPlaces — section context (F)", () => {
+  it("resolves ambiguous POIs in their section's city", async () => {
+    mockGeocode.mockImplementation(async (query: string) => {
+      const q = query.toLowerCase();
+      const santaFe = (name: string, lat: number, lon: number) =>
+        us(name, lat, lon, "US-NM");
+      if (q.startsWith("new mexico")) return [us("New Mexico", 34.3, -106.0)];
+      if (q.includes("santa fe plaza")) {
+        return [santaFe("Santa Fe Plaza", 35.687, -105.938)];
+      }
+      if (q.includes("meow wolf")) {
+        return [santaFe("Meow Wolf Santa Fe", 35.654, -105.997)];
+      }
+      if (q.includes("georgia o")) {
+        return [santaFe("Georgia O'Keeffe Museum", 35.69, -105.94)];
+      }
+      if (q.includes("cathedral basilica")) {
+        // With Santa Fe context we get the right cathedral; bare we don't.
+        return q.includes("santa fe")
+          ? [santaFe("Cathedral Basilica of St. Francis of Assisi", 35.686, -105.937)]
+          : [mx("Catedral Basílica", 19.43, -99.13)];
+      }
+      if (q.includes("canyon road")) {
+        return q.includes("santa fe")
+          ? [santaFe("Canyon Road", 35.683, -105.928)]
+          : [us("Canyon Road", 34.9, -106.6, "US-NM")]; // a different Canyon Road
+      }
+      return [];
+    });
+
+    const santaFeCtx = [
+      { text: "Santa Fe", kind: "city" as const },
+      { text: "New Mexico", kind: "region" as const },
+    ];
+    const outcome = await resolveItineraryPlaces(
+      [
+        { originalText: "Santa Fe Plaza", context: santaFeCtx },
+        { originalText: "Meow Wolf Santa Fe", context: santaFeCtx },
+        { originalText: "Georgia O'Keeffe Museum", context: santaFeCtx },
+        { originalText: "Cathedral Basilica", context: santaFeCtx },
+        { originalText: "Canyon Road", context: santaFeCtx },
+      ],
+      { destination: "New Mexico" },
+    );
+
+    const cathedral = outcome.resolved.find(
+      (p) => p.query === "Cathedral Basilica",
+    )!;
+    expect(cathedral.result!.countryCode).toBe("US");
+    expect(cathedral.result!.latitude).toBeCloseTo(35.686, 2);
+
+    const canyon = outcome.resolved.find((p) => p.query === "Canyon Road")!;
+    expect(canyon.result!.latitude).toBeCloseTo(35.683, 2);
+  });
+});
+
+describe("resolveItineraryPlaces — legitimate multi-region road trip (E)", () => {
+  it("does not pull distant National Parks into the first city", async () => {
+    const truth: Record<string, GeocodeResult> = {
+      "rocky mountain national park": us(
+        "Rocky Mountain National Park",
+        40.34,
+        -105.68,
+        "US-CO",
+      ),
+      "badlands national park": us("Badlands National Park", 43.86, -102.34, "US-SD"),
+      "mount rushmore national memorial": us(
+        "Mount Rushmore National Memorial",
+        43.879,
+        -103.459,
+        "US-SD",
+      ),
+      "theodore roosevelt national park": us(
+        "Theodore Roosevelt National Park",
+        46.98,
+        -103.54,
+        "US-ND",
+      ),
+    };
+    mockGeocode.mockImplementation(async (query: string) => {
+      const q = query.toLowerCase();
+      // A decoy near Denver for any *contextual* ("…, Denver") query.
+      if (q.includes("denver") && !truth[q]) {
+        return [us("Denver Decoy", 39.74, -104.99, "US-CO")];
+      }
+      const hit = Object.entries(truth).find(([k]) => q.includes(k));
+      return hit ? [hit[1]] : [];
+    });
+
+    const denver = [{ text: "Denver", kind: "city" as const }];
+    const outcome = await resolveItineraryPlaces([
+      { originalText: "Rocky Mountain National Park", context: denver },
+      { originalText: "Badlands National Park", context: denver },
+      { originalText: "Mount Rushmore National Memorial", context: denver },
+      { originalText: "Theodore Roosevelt National Park", context: denver },
+    ]);
+
+    const badlands = outcome.resolved.find((p) =>
+      p.query.startsWith("Badlands"),
+    )!;
+    expect(badlands.autoCorrected).toBe(false);
+    expect(badlands.result!.regionCode).toBe("US-SD");
+    expect(badlands.result!.latitude).toBeCloseTo(43.86, 1);
+
+    const rushmore = outcome.resolved.find((p) =>
+      p.query.startsWith("Mount Rushmore"),
+    )!;
+    expect(rushmore.result!.regionCode).toBe("US-SD");
+    expect(outcome.resolved.every((p) => p.autoCorrected === false)).toBe(true);
+  });
+});
+
+describe("resolveItineraryPlaces — no destination, distance-only (G)", () => {
+  it("does not overwrite a suspicious result when no alternative is clearly better", async () => {
+    // Four tight NM places + one that resolved ~600 km away, same country.
+    mockGeocode.mockImplementation(async (query: string) => {
+      const q = query.toLowerCase();
+      if (q.includes("plaza")) return [us("Santa Fe Plaza", 35.687, -105.938)];
+      if (q.includes("meow wolf")) return [us("Meow Wolf", 35.654, -105.997)];
+      if (q.includes("canyon road")) return [us("Canyon Road", 35.683, -105.928)];
+      if (q.includes("cathedral")) return [us("Cathedral", 35.686, -105.937)];
+      // "Some Overlook" only ever resolves to the same far-but-plausible spot.
+      if (q.includes("overlook")) return [us("Some Overlook", 41.5, -105.9, "US-WY")];
+      return [];
+    });
+
+    const outcome = await resolveItineraryPlaces([
+      "Santa Fe Plaza",
+      "Meow Wolf",
+      "Canyon Road",
+      "Cathedral",
+      "Some Overlook",
+    ]);
+
+    const overlook = outcome.resolved.find((p) => p.query === "Some Overlook")!;
+    // Flagged as suspicious (distance) but re-search offers nothing better.
+    expect(overlook.autoCorrected).toBe(false);
+    expect(overlook.result!.latitude).toBeCloseTo(41.5, 1);
   });
 });

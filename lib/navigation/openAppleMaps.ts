@@ -1,5 +1,7 @@
 type NavigablePlace = {
   name?: string;
+  /** Mapbox's canonical name, preferred for the map-search label when present. */
+  resolvedName?: string;
   latitude: number;
   longitude: number;
 };
@@ -11,7 +13,8 @@ type NavigablePlace = {
 export function appleMapsUrl(place: NavigablePlace): string {
   const daddr = `${place.latitude},${place.longitude}`;
   const params = new URLSearchParams({ daddr });
-  if (place.name) params.set("q", place.name);
+  const label = place.resolvedName || place.name;
+  if (label) params.set("q", label);
   return `https://maps.apple.com/?${params.toString()}`;
 }
 
